@@ -6,7 +6,7 @@
 
 RUNONCE_SCRIPT_NAME=runonce-at-boot
 SCRIPT_DIR=/etc/${RUNONCE_SCRIPT_NAME}.d
-SCRIPT_RAN_DIR=${SCRIPT_DIR}/ran
+SCRIPT_RAN_DIR=/var/${RUNONCE_SCRIPT_NAME}.d/ran
 BIN_DIR=/usr/sbin
 CRON_DIR=/etc/cron.d
 
@@ -35,9 +35,12 @@ function abort_if_not_root
 	fi 
 }
 
-function setup_runonce
+function setup_runonce_at_boot_system
 {
 	abort_if_not_root
+	if [ ! -d "$SCRIPT_DIR" ]; then
+		mkdir -p ${SCRIPT_DIR}
+	fi
 	if [ ! -d "$SCRIPT_RAN_DIR" ]; then
 		mkdir -p ${SCRIPT_RAN_DIR}
 	fi
@@ -53,7 +56,7 @@ function schedule_runonce_script
 {
 	abort_if_not_root
 	scriptFile=$1
-	if [ -x "$scriptFile" ]; then
+	if [ ! -f "$scriptFile" ]; then
 		abort "Script file [${scriptFile}] is not executable or not found"
 	fi 
 	scp ${scriptFile} ${SCRIPT_DIR}
@@ -72,7 +75,7 @@ function run_runonce_scripts
 		scriptName=$(basename ${scriptFile})
 		timestamp=$(date +%Y%m%d_%I:%M:%S_%P)
 		logger -t ${RUNONCE_SCRIPT_NAME} "Executed: ${scriptName}:${scriptFile}"
-		${scriptFile} 2>&1 #| logger -t {RUNONCE_SCRIPT_NAME}
+		${scriptFile} 2>&1 | logger -t "${RUNONCE_SCRIPT_NAME}::${scriptName}"
 		mv ${scriptFile} ${SCRIPT_RAN_DIR}/${scriptName}_${timestamp}
 	done
 } 
@@ -85,7 +88,7 @@ case $opt in
 		show_usage
 		;;
 	s)
-		setup_runonce
+		setup_runonce_at_boot_system
 		;;
 	f)
 		scriptFile=$OPTARG
