@@ -1,0 +1,104 @@
+#!/bin/bash
+#
+# @author: Aldrin Baroi
+#
+#
+
+RUNONCE_SCRIPT_NAME=runonce-at-boot
+SCRIPT_DIR=/etc/${RUNONCE_SCRIPT_NAME}.d
+SCRIPT_RAN_DIR=${SCRIPT_DIR}/ran
+BIN_DIR=/usr/sbin
+CRON_DIR=/etc/cron.d
+
+function show_usage
+{
+	echo ""
+	echo "runonce-at-boot usage:"
+	echo ""
+	echo "  runonce-at-boot [sfh]"
+	echo "    -s             Setup the \"run once at boot\" system"
+	echo "    -f scriptfile  Schedule the scriptfile to run at boot"
+	echo "    -h             Show this usage text"
+	echo ""
+}
+
+function abort 
+{
+	printf "\n\n${1}\nExiting...\n\n"
+	exit 1
+}
+
+function abort_if_not_root
+{
+	if [ "$(whoami)" != "root" ]; then
+		abort "This script can only be run as \"root\""
+	fi 
+}
+
+function setup_runonce
+{
+	abort_if_not_root
+	if [ ! -d "$SCRIPT_RAN_DIR" ]; then
+		mkdir -p ${SCRIPT_RAN_DIR}
+	fi
+	scp ${RUNONCE_SCRIPT_NAME} ${BIN_DIR}
+	chown root:root ${BIN_DIR}/${RUNONCE_SCRIPT_NAME}
+	chmod 755 ${BIN_DIR}/${RUNONCE_SCRIPT_NAME}
+	cat <<-EOF > ${CRON_DIR}/${RUNONCE_SCRIPT_NAME}
+		@reboot root ${BIN_DIR}/${RUNONCE_SCRIPT_NAME}
+		EOF
+}
+
+function schedule_runonce_script
+{
+	abort_if_not_root
+	scriptFile=$1
+	if [ -x "$scriptFile" ]; then
+		abort "Script file [${scriptFile}] is not executable or not found"
+	fi 
+	scp ${scriptFile} ${SCRIPT_DIR}
+	chown root:root ${SCRIPT_DIR}/${scriptFile}
+	chmod 755 ${SCRIPT_DIR}/${scriptFile}
+}
+
+function run_runonce_scripts
+{
+	abort_if_not_root
+	for scriptFile in $(find ${SCRIPT_DIR} -maxdepth 1 -type f)
+	do
+		if [ ! -x "$scriptFile" ]; then
+			continue
+		fi
+		scriptName=$(basename ${scriptFile})
+		timestamp=$(date +%Y%m%d_%I:%M:%S_%P)
+		logger -t ${RUNONCE_SCRIPT_NAME} "Executed: ${scriptName}:${scriptFile}"
+		${scriptFile} 2>&1 #| logger -t {RUNONCE_SCRIPT_NAME}
+		mv ${scriptFile} ${SCRIPT_RAN_DIR}/${scriptName}_${timestamp}
+	done
+} 
+
+# __main__
+
+getopts ":sf:h" opt ${@}
+case $opt in
+	h)
+		show_usage
+		;;
+	s)
+		setup_runonce
+		;;
+	f)
+		scriptFile=$OPTARG
+		schedule_runonce_script ${scriptFile}
+		;;
+	:)
+		echo "Invalid option"
+		show_usage
+		;;
+	*)
+		run_runonce_scripts
+		;;
+esac
+
+#::END::
+
