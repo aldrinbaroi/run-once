@@ -10,14 +10,24 @@ SCRIPT_RAN_DIR=/var/${RUNONCE_SCRIPT_NAME}.d/ran
 BIN_DIR=/usr/sbin
 CRON_DIR=/etc/cron.d
 
+VALID_USER=1
+INVALID_USER=0
+
 function show_usage
 {
+	msg=$1
+	if [ ! -z "$msg" ]; then
+		echo ""
+		echo "Error: invalid option"
+		echo ""
+	fi
 	echo ""
 	echo "runonce-at-boot usage:"
 	echo ""
-	echo "  runonce-at-boot [sfh]"
+	echo "  runonce-at-boot [sfuh]"
 	echo "    -s             Setup the \"run once at boot\" system"
 	echo "    -f scriptfile  Schedule the scriptfile to run at boot"
+	echo "    -u userid      Run as user ID"
 	echo "    -h             Show this usage text"
 	echo ""
 }
@@ -38,11 +48,11 @@ function abort_if_not_root
 function setup_runonce_at_boot_system
 {
 	abort_if_not_root
-	if [ ! -d "$SCRIPT_DIR" ]; then
-		mkdir -p ${SCRIPT_DIR}
+	if [ ! -d "${SCRIPT_DIR}/runas" ]; then
+		mkdir -p ${SCRIPT_DIR}/runas
 	fi
-	if [ ! -d "$SCRIPT_RAN_DIR" ]; then
-		mkdir -p ${SCRIPT_RAN_DIR}
+	if [ ! -d "${SCRIPT_RAN_DIR}/runas" ]; then
+		mkdir -p ${SCRIPT_RAN_DIR}/runas
 	fi
 	scp ${RUNONCE_SCRIPT_NAME} ${BIN_DIR}
 	chown root:root ${BIN_DIR}/${RUNONCE_SCRIPT_NAME}
@@ -52,19 +62,52 @@ function setup_runonce_at_boot_system
 		EOF
 }
 
-function schedule_runonce_script
+function is_valid_user
+{
+        user=$1
+        id -u ${user} > /dev/null 2>&1
+        status=$?
+        if (( $status == 0 )); then
+                echo ${VALID_USER}
+        else
+                echo ${INVALID_USER}
+        fi
+} 
+
+function schedule_runonce_at_boot_script
 {
 	abort_if_not_root
 	scriptFile=$1
+	runAsUser=$2
 	if [ ! -f "$scriptFile" ]; then
 		abort "Script file [${scriptFile}] is not executable or not found"
 	fi 
-	scp ${scriptFile} ${SCRIPT_DIR}
-	chown root:root ${SCRIPT_DIR}/${scriptFile}
-	chmod 755 ${SCRIPT_DIR}/${scriptFile}
+	if [ ! -z "$runAsUser" ]; then
+		if (( ! $(is_valid_user ${runAsUser}) )); then
+			abort "${runAsUser} is not a valid user"
+		fi
+		runAsUserDir=${SCRIPT_DIR}/runas/${runAsUser}
+		if [ ! -d "$runAsUserDir" ]; then
+			mkdir -p ${runAsUserDir}
+		fi
+		scp ${scriptFile} ${runAsUserDir}
+		chown root:root ${runAsUserDir}/${scriptFile}
+		chmod 755 ${runAsUserDir}/${scriptFile}
+	else
+		scp ${scriptFile} ${SCRIPT_DIR}
+		chown root:root ${SCRIPT_DIR}/${scriptFile}
+		chmod 755 ${SCRIPT_DIR}/${scriptFile}
+	fi 
+	echo "The [${scriptFile}] script has been scheduled to run at next boot"
+	if [ ! -z "$runAsUser" ]; then
+		echo "and the script will run as ${runAsUser}"
+	fi
+	echo ""
 }
 
-function run_runonce_scripts
+ERROR=1
+
+function run_runonce_at_boot_scripts
 {
 	abort_if_not_root
 	for scriptFile in $(find ${SCRIPT_DIR} -maxdepth 1 -type f)
@@ -80,9 +123,34 @@ function run_runonce_scripts
 	done
 } 
 
+function run_runonce_at_boot_scripts__runAsUser
+{
+	abort_if_not_root
+	runAsUserBaseScriptDir=${SCRIPT_DIR}/runas
+	for runAsUserScriptDir in $(find ${runAsUserBaseScriptDir}/* -maxdepth 1 -type d)
+	do
+		runAsUser=$(basename ${runAsUserScriptDir})
+		runAsUserScriptRanDir=${SCRIPT_RAN_DIR}/runas/${runAsUser}
+		if [ ! -d "${runAsUserScriptRanDir}" ]; then
+			mkdir -p ${runAsUserScriptRanDir}
+		fi
+		for scriptFile in $(find ${runAsUserScriptDir} -maxdepth 1 -type f)
+		do
+			if [ ! -x "$scriptFile" ]; then
+				continue
+			fi
+			scriptName=$(basename ${scriptFile})
+			timestamp=$(date +%Y%m%d_%I:%M:%S_%P)
+			logger -t ${RUNONCE_SCRIPT_NAME} "Executed: ${runAsUser}:${scriptName}:${scriptFile}"
+			${scriptFile} 2>&1 | logger -t "${RUNONCE_SCRIPT_NAME}::${runAsUser}::${scriptName}"
+			mv ${scriptFile} ${runAsUserScriptRanDir}/${scriptName}_${timestamp}
+		done
+	done
+} 
+
 # __main__
 
-getopts ":sf:h" opt ${@}
+getopts ":sf:u:h" opt ${@}
 case $opt in
 	h)
 		show_usage
@@ -92,14 +160,19 @@ case $opt in
 		;;
 	f)
 		scriptFile=$OPTARG
-		schedule_runonce_script ${scriptFile}
+		getopts ":sf:u:h" opt2 ${@}
+		runAsUser=""
+		if [ "$opt2" = "u" ]; then
+			runAsUser=$OPTARG
+		fi
+		schedule_runonce_at_boot_script ${scriptFile} ${runAsUser}
 		;;
 	:)
-		echo "Invalid option"
-		show_usage
+		show_usage "Invalid option"
 		;;
 	*)
-		run_runonce_scripts
+		run_runonce_at_boot_scripts
+		run_runonce_at_boot_scripts__runAsUser
 		;;
 esac
 
