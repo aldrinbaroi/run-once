@@ -24,10 +24,10 @@ function show_usage
 	echo ""
 	echo "runonce-at-boot usage:"
 	echo ""
-	echo "  runonce-at-boot [sfuh]"
+	echo "  runonce-at-boot -s | -f scriptFile [-u userid] | -h"
 	echo "    -s             Setup the \"run once at boot\" system"
 	echo "    -f scriptfile  Schedule the scriptfile to run at boot"
-	echo "    -u userid      Run as user ID"
+	echo "    -u userid      Run as user ID (optional)"
 	echo "    -h             Show this usage text"
 	echo ""
 }
