@@ -18,7 +18,7 @@ function show_usage
 	msg=$1
 	if [ ! -z "$msg" ]; then
 		echo ""
-		echo "Error: invalid option"
+		echo "${msg}"
 		echo ""
 	fi
 	echo ""
@@ -168,7 +168,7 @@ case $opt in
 		schedule_runonce_at_boot_script ${scriptFile} ${runAsUser}
 		;;
 	:)
-		show_usage "Invalid option"
+		show_usage "Error: Invalid option"
 		;;
 	*)
 		run_runonce_at_boot_scripts
