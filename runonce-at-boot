@@ -142,7 +142,7 @@ function run_runonce_at_boot_scripts__runAsUser
 			scriptName=$(basename ${scriptFile})
 			timestamp=$(date +%Y%m%d_%I:%M:%S_%P)
 			logger -t ${RUNONCE_SCRIPT_NAME} "Executed: ${runAsUser}:${scriptName}:${scriptFile}"
-			${scriptFile} 2>&1 | logger -t "${RUNONCE_SCRIPT_NAME}::${runAsUser}::${scriptName}"
+			su - ${runAsUser} -c ${scriptFile} 2>&1 | logger -t "${RUNONCE_SCRIPT_NAME}::${runAsUser}::${scriptName}"
 			mv ${scriptFile} ${runAsUserScriptRanDir}/${scriptName}_${timestamp}
 		done
 	done
