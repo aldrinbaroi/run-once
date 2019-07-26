@@ -105,8 +105,6 @@ function schedule_runonce_at_boot_script
 	echo ""
 }
 
-ERROR=1
-
 function run_runonce_at_boot_scripts
 {
 	abort_if_not_root
