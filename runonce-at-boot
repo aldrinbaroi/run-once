@@ -4,18 +4,29 @@
 #
 #
 
-RUNONCE_SCRIPT_NAME=runonce-at-boot
-SCRIPT_DIR=/etc/${RUNONCE_SCRIPT_NAME}.d
-SCRIPT_RAN_DIR=/var/${RUNONCE_SCRIPT_NAME}.d/ran
-BIN_DIR=/usr/sbin
-CRON_DIR=/etc/cron.d
+readonly RUNONCE_SCRIPT_NAME="runonce-at-boot"
+readonly CONFIG_DIR="/etc/${RUNONCE_SCRIPT_NAME}"
+readonly CONFIG_FILE="${CONFIG_DIR}/${RUNONCE_SCRIPT_NAME}.conf"
+readonly SCRIPT_DIR="/var/${RUNONCE_SCRIPT_NAME}/scheduled"
+readonly SCRIPT_RAN_DIR="/var/${RUNONCE_SCRIPT_NAME}/ran"
+readonly LOG_DIR="/var/log/${RUNONCE_SCRIPT_NAME}"
+readonly LOG_FILE="${LOG_DIR}/${RUNONCE_SCRIPT_NAME}.log"
+readonly LOG_TAG_DEFAULT="${RUNONCE_SCRIPT_NAME}"
+readonly BIN_DIR="/usr/sbin"
+readonly CRON_DIR="/etc/cron.d" 
+readonly VALID_USER=1
+readonly INVALID_USER=0
+readonly TRUE=1
+readonly FALSE=0
+readonly ERROR=1
 
-VALID_USER=1
-INVALID_USER=0
+LOG_TAG="${LOG_TAG_DEFAULT}"
+
+source ${CONFIG_FILE}
 
 function show_usage
 {
-	msg=$1
+	local msg=$1
 	if [ ! -z "$msg" ]; then
 		echo ""
 		echo "${msg}"
@@ -24,23 +35,49 @@ function show_usage
 	echo ""
 	echo "runonce-at-boot usage:"
 	echo ""
-	echo "  runonce-at-boot -s | -f scriptFile [-u userid] | -h"
-	echo "    -s             Setup the \"run once at boot\" system"
-	echo "    -f scriptfile  Schedule the scriptfile to run at boot"
-	echo "    -u userid      Run as user ID (optional)"
-	echo "    -h             Show this usage text"
+	echo "  runonce-at-boot -s [-r] | -f scriptFile [-u userid] [-d dependencies] | -h"
+	echo "    -s              Setup the \"run once at boot\" system"
+	echo "    -r              Reset the configureation file to default values"
+	echo "    -f scriptfile   Schedule the script file to run at boot"
+	echo "    -u userid       Run as user ID (optional)"
+	echo "    -d dependencies Script file's runtime service dependencies (optional)"
+	echo "    -h              Show this usage text"
 	echo ""
 }
 
+function set_log_tag
+{
+	LOG_TAG=$1
+}
+
+function log
+{
+	echo "${1}" | tee >(awk -F "@@" -v prefix="$(date '+%b %d %H:%M:%S') $(hostname) ${LOG_TAG}: " '{print prefix $1}'  >> ${LOG_FILE}) | logger  -t "${LOG_TAG}"
+
+}
+
+function log_pipe
+{
+        while read message; do
+                log "${message}"
+        done
+} 
+
 function abort 
 {
-	printf "\n\n${1}\nExiting...\n\n"
+	log "${1}"
+	log "Aborting..."
 	exit 1
 }
 
 function abort_if_not_root
-{
+{ 
 	if [ "$(whoami)" != "root" ]; then
+		local NON_ROOT_LOG_FILE="${HOME}/${RUNONCE_SCRIPT_NAME}.log"
+		set_log_tag "${LOG_TAG}::[$(whoami)]"
+		eval "log() { 
+		     echo "\${1}" | tee >(awk -F "@@" -v prefix=\"$(date '+%b %d %H:%M:%S') $(hostname) ${LOG_TAG}: \" '{print prefix \$1}'  >> ${NON_ROOT_LOG_FILE}) | logger  -t "${LOG_TAG}"
+		}"
 		abort "This script can only be run as \"root\""
 	fi 
 }
@@ -48,11 +85,33 @@ function abort_if_not_root
 function setup_runonce_at_boot_system
 {
 	abort_if_not_root
+	local resetConfigFile=$1
+	if [ ! -d "${CONFIG_DIR}" ]; then
+		mkdir -p "${CONFIG_DIR}"
+	fi
 	if [ ! -d "${SCRIPT_DIR}/runas" ]; then
-		mkdir -p ${SCRIPT_DIR}/runas
+		mkdir -p "${SCRIPT_DIR}/runas"
 	fi
 	if [ ! -d "${SCRIPT_RAN_DIR}/runas" ]; then
-		mkdir -p ${SCRIPT_RAN_DIR}/runas
+		mkdir -p "${SCRIPT_RAN_DIR}/runas"
+	fi
+	if [ ! -d "${LOG_DIR}" ]; then
+		mkdir -p "${LOG_DIR}"
+	fi
+	if [ ! -f "${CONFIG_FILE}" ] || [ "${resetConfigFile}" = "reset" ]; then
+		cat <<-EOF > ${CONFIG_FILE}
+			# 
+			# runonce-at-boot configuration file
+			#
+			
+			# Maximum number of times to check whether dependency services are active or not
+			MAX_CHECK_COUNT=6
+
+			# Number of seconds to wait between dependency service active or not check
+			CHECK_INTERVAL=5
+
+			#::END::
+			EOF
 	fi
 	scp ${RUNONCE_SCRIPT_NAME} ${BIN_DIR}
 	chown root:root ${BIN_DIR}/${RUNONCE_SCRIPT_NAME}
@@ -64,7 +123,8 @@ function setup_runonce_at_boot_system
 
 function is_valid_user
 {
-        user=$1
+        local user=$1
+	local status
         id -u ${user} > /dev/null 2>&1
         status=$?
         if (( $status == 0 )); then
@@ -74,14 +134,29 @@ function is_valid_user
         fi
 } 
 
+function save_runonce_at_boot_script_dependencies
+{
+	local scriptDir=$1
+	local scriptFile=$2
+	local dependencies=$3
+	local dependenciesFile="${scriptDir}/${scriptFile}.dep"
+	cat <<-EOF > ${dependenciesFile}
+		${dependencies}
+		EOF
+}
+
 function schedule_runonce_at_boot_script
 {
 	abort_if_not_root
-	scriptFile=$1
-	runAsUser=$2
+	local scriptFile=$1
+	local runAsUser=$2
+	local dependencies=$3
 	if [ ! -f "$scriptFile" ]; then
 		abort "Script file [${scriptFile}] is not executable or not found"
 	fi 
+	if [ "$runAsUser" = "root" ]; then
+		unset runAsUser
+	fi
 	if [ ! -z "$runAsUser" ]; then
 		if (( ! $(is_valid_user ${runAsUser}) )); then
 			abort "${runAsUser} is not a valid user"
@@ -93,30 +168,229 @@ function schedule_runonce_at_boot_script
 		scp ${scriptFile} ${runAsUserDir}
 		chown root:root ${runAsUserDir}/${scriptFile}
 		chmod 755 ${runAsUserDir}/${scriptFile}
+		if [ ! -z "$dependencies" ]; then
+			save_runonce_at_boot_script_dependencies ${runAsUserDir} ${scriptFile} ${dependencies}
+		fi
 	else
 		scp ${scriptFile} ${SCRIPT_DIR}
 		chown root:root ${SCRIPT_DIR}/${scriptFile}
 		chmod 755 ${SCRIPT_DIR}/${scriptFile}
+		if [ ! -z "$dependencies" ]; then
+			save_runonce_at_boot_script_dependencies ${SCRIPT_DIR} ${scriptFile} ${dependencies}
+		fi
 	fi 
-	echo "The [${scriptFile}] script has been scheduled to run at next boot"
+	log "The [${scriptFile}] script has been scheduled to run at next boot"
 	if [ ! -z "$runAsUser" ]; then
-		echo "and the script will run as ${runAsUser}"
+		log "and the script will run as ${runAsUser}"
 	fi
-	echo ""
+} 
+
+function is_service_exist
+{
+        local service=$1
+        if [ ! -z ${service} ]; then
+                if (( $(systemctl list-units --full --all 2> /dev/null | grep -Fq "${service}"; echo $?) == 0 )); then
+                        echo ${TRUE}
+                else
+                        echo ${FALSE}
+                fi
+        else
+                echo ${FALSE}
+        fi
+}
+
+function is_service_enabled
+{
+        local service=$1
+        if [ ! -z ${service} ]; then
+                if (( $(systemctl is-enabled -q ${service}; echo $?) == 0 )); then
+                        echo ${TRUE}
+                else
+                        echo ${FALSE}
+                fi
+        else
+                echo ${FALSE}
+        fi
+}
+
+function is_service_active
+{
+        local service=$1
+        if [ ! -z ${service} ]; then
+                if (( $(systemctl is-active -q ${service}; echo $?) == 0 )); then
+                        echo ${TRUE}
+                else
+                        echo ${FALSE}
+                fi
+        else
+                echo ${FALSE}
+        fi
+}
+
+function are_all_services_exist
+{
+        local servicesList=$1
+        local areAllServicesExist=${TRUE}
+        local nonExistentServiceList=""
+        for service in ${servicesList//,/ }; do
+                if (( ! $(is_service_exist ${service}) )); then
+                        areAllServicesExist=${FALSE}
+                        nonExistentServiceList="${nonExistentServiceList} ${service}"
+                fi
+        done
+        echo ${nonExistentServiceList}
+        if (( ! ${areAllServicesExist} )); then
+                return ${ERROR}
+        fi
+}
+
+
+function are_all_services_enabled
+{
+        local servicesList=$1
+        local areAllServicesEnabled=${TRUE}
+        local disabledServicesList=""
+        for service in ${servicesList//,/ }; do
+                if (( ! $(is_service_enabled ${service}) )); then
+                        areAllServicesEnabled=${FALSE}
+                        disabledServicesList="${disabledServicesList} ${service}"
+                fi
+        done
+        echo ${disabledServicesList}
+        if (( ! ${areAllServicesEnabled} )); then
+                return ${ERROR}
+        fi
+}
+
+function are_all_services_active
+{
+        local servicesList=$1
+        local areAllServicesActive=${TRUE}
+        local inactiveServicesList=""
+        for service in ${servicesList//,/ }; do
+                if (( ! $(is_service_active ${service}) )); then
+                        areAllServicesActive=${FALSE}
+                        inactiveServicesList="${inactiveServicesList} ${service}"
+                fi
+        done
+        echo ${inactiveServicesList}
+        if (( ! ${areAllServicesActive} )); then
+                return ${ERROR}
+        fi
+}
+
+function wait_for_service_to_be_active
+{
+        local service=$1
+        for checkCount in $(seq 1 ${MAX_CHECK_COUNT}); do
+                if (( ! $(is_service_active ${service}) )); then
+                        log "Wating ${CHECK_INTERVAL} seconds for ${service} to become active..."
+                        sleep ${CHECK_INTERVAL}
+                fi
+        done
+        if (( ! $(is_service_active ${service}) )); then
+                return ${ERROR}
+        fi
+}
+
+function wait_for_list_of_services_to_be_active
+{
+        local waitForServicesList=$1
+        local nonExistentServicesList
+        local disabledServicesList
+        local inactiveServicesList
+	local callStatus
+
+        nonExistentServicesList=$(are_all_services_exist "${waitForServicesList}")
+        callStatus=$?
+        if (( ${callStatus} )); then
+                log "Not all services exist. Non-existent services: ${nonExistentServicesList}"
+                return ${ERROR}
+        fi
+        disabledServicesList=$(are_all_services_enabled "${waitForServicesList}")
+        callStatus=$?
+        if (( ${callStatus} )); then
+                log "Not all services enabled. Services not enabled: ${disabledServicesList}"
+                return ${ERROR}
+        fi
+        inactiveServicesList=$(are_all_services_active "${waitForServicesList}")
+        callStatus=$?
+        if (( ${callStatus} )); then
+                log "Not all services yet active. Services not yet active: ${inactiveServicesList}"
+                log "Waiting for dependency services to become active"
+                for waitForService in ${inactiveServicesList//,/ } ; do
+                        if (( ! $(is_service_active ${waitForService}) )); then
+                                log "${waitForService} is not active."
+                                wait_for_service_to_be_active ${waitForService}
+                                callStatus=$?
+                                if (( ${callStatus} )); then
+                                        echo "Dependency services are still not active."
+                                        return ${ERROR}
+                                fi
+                        fi
+                done
+        fi
+} 
+
+function execute_script_after_dependencies_are_active
+{
+        local func=$1
+	local waitForServicesList=$2
+	local statusMessage
+        statusMessage=$(wait_for_list_of_services_to_be_active ${waitForServicesList})
+        callStatus=$?
+        if (( ${callStatus} )); then
+	       	log "Error: ${statusMessage}"
+                log "Exiting..."
+                exit ${ERROR}
+        else
+                ${func} 2>&1 | log_pipe
+        fi
+} 
+
+function load_dependencies 
+{
+	local dependenciesFile=$1
+	local dependencies=""
+	local lineCount=0
+	if [ -f "${dependenciesFile}" ]; then
+		while read line; do
+			((lineCount++))
+			if (( lineCount > 1 )); then
+				dependencies="${dependencies},${line}"
+			else
+				dependencies="${line}"
+			fi
+		done < ${dependenciesFile}
+	fi
+	echo ${dependencies}
 }
 
 function run_runonce_at_boot_scripts
 {
 	abort_if_not_root
-	for scriptFile in $(find ${SCRIPT_DIR} -maxdepth 1 -type f)
+	local scriptName
+	local timestamp
+	local dependenciesFile
+	local dependencies
+	for scriptFile in $(find ${SCRIPT_DIR} -maxdepth 1 -type f 2> /dev/null)
 	do
 		if [ ! -x "$scriptFile" ]; then
 			continue
 		fi
 		scriptName=$(basename ${scriptFile})
 		timestamp=$(date +%Y%m%d_%I:%M:%S_%P)
-		logger -t ${RUNONCE_SCRIPT_NAME} "Executed: ${scriptName}:${scriptFile}"
-		${scriptFile} 2>&1 | logger -t "${RUNONCE_SCRIPT_NAME}::${scriptName}"
+		dependenciesFile="${scriptFile}.dep"
+		set_log_tag "${RUNONCE_SCRIPT_NAME}::${scriptName}"
+		log "Executing: ${scriptName}:${scriptFile}"
+		dependencies=""
+		if [ -f "${dependenciesFile}" ]; then
+			dependencies=$(load_dependencies "${dependenciesFile}") 
+			execute_script_after_dependencies_are_active ${scriptFile} ${dependencies}
+			mv ${dependenciesFile} ${SCRIPT_RAN_DIR}/${scriptName}.dep_${timestamp}
+		else
+			${scriptFile} 2>&1 | log_pipe
+		fi
 		mv ${scriptFile} ${SCRIPT_RAN_DIR}/${scriptName}_${timestamp}
 	done
 } 
@@ -124,8 +398,15 @@ function run_runonce_at_boot_scripts
 function run_runonce_at_boot_scripts__runAsUser
 {
 	abort_if_not_root
-	runAsUserBaseScriptDir=${SCRIPT_DIR}/runas
-	for runAsUserScriptDir in $(find ${runAsUserBaseScriptDir}/* -maxdepth 1 -type d)
+	local runAsUserBaseScriptDir="${SCRIPT_DIR}/runas"
+	local runAsUser
+	local runAsUserScriptRanDir
+	local scriptName
+	local timestamp
+	local dependenciesFile
+	local dependencies
+	local cmd
+	for runAsUserScriptDir in $(find ${runAsUserBaseScriptDir}/* -maxdepth 1 -type d 2> /dev/null)
 	do
 		runAsUser=$(basename ${runAsUserScriptDir})
 		runAsUserScriptRanDir=${SCRIPT_RAN_DIR}/runas/${runAsUser}
@@ -139,8 +420,18 @@ function run_runonce_at_boot_scripts__runAsUser
 			fi
 			scriptName=$(basename ${scriptFile})
 			timestamp=$(date +%Y%m%d_%I:%M:%S_%P)
-			logger -t ${RUNONCE_SCRIPT_NAME} "Executed: ${runAsUser}:${scriptName}:${scriptFile}"
-			su - ${runAsUser} -c ${scriptFile} 2>&1 | logger -t "${RUNONCE_SCRIPT_NAME}::${runAsUser}::${scriptName}"
+			dependenciesFile="${scriptFile}.dep"
+			set_log_tag "${RUNONCE_SCRIPT_NAME}::${scriptName}::[${runAsUser}]"
+			log "Executing: ${scriptName}:${scriptFile}"
+			dependencies=""
+			if [ -f "${dependenciesFile}" ]; then
+				dependencies=$(load_dependencies "${dependenciesFile}")
+				cmd="su - ${runAsUser} -c ${scriptFile}"
+				execute_script_after_dependencies_are_active "${cmd}" ${dependencies}
+				mv ${dependenciesFile} ${runAsUserScriptRanDir}/${scriptName}.dep_${timestamp}
+			else
+				su - ${runAsUser} -c ${scriptFile} 2>&1 | log_pipe
+			fi
 			mv ${scriptFile} ${runAsUserScriptRanDir}/${scriptName}_${timestamp}
 		done
 	done
@@ -148,22 +439,34 @@ function run_runonce_at_boot_scripts__runAsUser
 
 # __main__
 
-getopts ":sf:u:h" opt ${@}
+getopts ":srf:u:d:h" opt ${@}
 case $opt in
 	h)
 		show_usage
 		;;
 	s)
-		setup_runonce_at_boot_system
+		resetConfigFile=""
+		getopts ":srf:u:d:h" opt ${@}
+		if [ "$opt" = "r" ]; then
+			resetConfigFile="reset"
+		fi
+		setup_runonce_at_boot_system ${resetConfigFile}
 		;;
 	f)
 		scriptFile=$OPTARG
-		getopts ":sf:u:h" opt2 ${@}
-		runAsUser=""
-		if [ "$opt2" = "u" ]; then
-			runAsUser=$OPTARG
-		fi
-		schedule_runonce_at_boot_script ${scriptFile} ${runAsUser}
+		runAsUser="root"
+		dependencies=""
+		while getopts ":srf:u:d:h" opt ${@}; do
+			case $opt in
+				u)
+					runAsUser=$OPTARG
+					;;
+				d)
+					dependencies=$OPTARG
+					;;
+			esac
+		done
+		schedule_runonce_at_boot_script ${scriptFile} ${runAsUser} ${dependencies}
 		;;
 	:)
 		show_usage "Error: Invalid option"
