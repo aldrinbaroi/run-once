@@ -22,8 +22,6 @@ readonly ERROR=1
 
 LOG_TAG="${LOG_TAG_DEFAULT}"
 
-source ${CONFIG_FILE}
-
 function show_usage
 {
 	local msg=$1
@@ -324,8 +322,10 @@ function wait_for_list_of_services_to_be_active
                                 wait_for_service_to_be_active ${waitForService}
                                 callStatus=$?
                                 if (( ${callStatus} )); then
-                                        echo "Dependency services are still not active."
+                                        log "Not all dependency services are still active."
                                         return ${ERROR}
+				else
+					log "Dependency service [${waitForService}] is now active."
                                 fi
                         fi
                 done
@@ -334,7 +334,7 @@ function wait_for_list_of_services_to_be_active
 
 function execute_script_after_dependencies_are_active
 {
-        local func=$1
+        local scriptFile=$1
 	local waitForServicesList=$2
 	local statusMessage
         statusMessage=$(wait_for_list_of_services_to_be_active ${waitForServicesList})
@@ -344,7 +344,7 @@ function execute_script_after_dependencies_are_active
                 log "Exiting..."
                 exit ${ERROR}
         else
-                ${func} 2>&1 | log_pipe
+                ${scriptFile} 2>&1 | log_pipe
         fi
 } 
 
@@ -376,6 +376,7 @@ function run_runonce_at_boot_scripts
 	for scriptFile in $(find ${SCRIPT_DIR} -maxdepth 1 -type f 2> /dev/null)
 	do
 		if [ ! -x "$scriptFile" ]; then
+			log "Failed to execute [${scriptFile}].  Not executable or not found."
 			continue
 		fi
 		scriptName=$(basename ${scriptFile})
@@ -384,6 +385,7 @@ function run_runonce_at_boot_scripts
 		set_log_tag "${RUNONCE_SCRIPT_NAME}::${scriptName}"
 		log "Executing: ${scriptName}:${scriptFile}"
 		dependencies=""
+		log "Executing script [${scriptFile}]..."
 		if [ -f "${dependenciesFile}" ]; then
 			dependencies=$(load_dependencies "${dependenciesFile}") 
 			execute_script_after_dependencies_are_active ${scriptFile} ${dependencies}
@@ -416,6 +418,7 @@ function run_runonce_at_boot_scripts__runAsUser
 		for scriptFile in $(find ${runAsUserScriptDir} -maxdepth 1 -type f)
 		do
 			if [ ! -x "$scriptFile" ]; then
+				log "Failed to execute [${scriptFile}].  Not executable or not found."
 				continue
 			fi
 			scriptName=$(basename ${scriptFile})
@@ -424,13 +427,14 @@ function run_runonce_at_boot_scripts__runAsUser
 			set_log_tag "${RUNONCE_SCRIPT_NAME}::${scriptName}::[${runAsUser}]"
 			log "Executing: ${scriptName}:${scriptFile}"
 			dependencies=""
+			log "Executing script [${scriptFile}]..."
+			cmd="runuser -u ${runAsUser} -- ${scriptFile}"
 			if [ -f "${dependenciesFile}" ]; then
 				dependencies=$(load_dependencies "${dependenciesFile}")
-				cmd="su - ${runAsUser} -c ${scriptFile}"
 				execute_script_after_dependencies_are_active "${cmd}" ${dependencies}
 				mv ${dependenciesFile} ${runAsUserScriptRanDir}/${scriptName}.dep_${timestamp}
 			else
-				su - ${runAsUser} -c ${scriptFile} 2>&1 | log_pipe
+				${cmd} 2>&1 | log_pipe
 			fi
 			mv ${scriptFile} ${runAsUserScriptRanDir}/${scriptName}_${timestamp}
 		done
@@ -472,6 +476,7 @@ case $opt in
 		show_usage "Error: Invalid option"
 		;;
 	*)
+		source ${CONFIG_FILE}
 		run_runonce_at_boot_scripts
 		run_runonce_at_boot_scripts__runAsUser
 		;;
